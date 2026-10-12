@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LLM Robustness to Typos & Noise</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>
+	body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+	.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+	/* custom range slider styling */
+	input[type="range"] {
+		-webkit-appearance: none;
+		appearance: none;
+		height: 6px;
+		border-radius: 9999px;
+		background: #e5e7eb;
+		outline: none;
+	}
+	input[type="range"]::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		appearance: none;
+		width: 20px;
+		height: 20px;
+		border-radius: 50%;
+		background: #4f46e5;
+		cursor: pointer;
+		border: 3px solid #fff;
+		box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+	}
+	input[type="range"]::-moz-range-thumb {
+		width: 20px;
+		height: 20px;
+		border-radius: 50%;
+		background: #4f46e5;
+		cursor: pointer;
+		border: 3px solid #fff;
+		box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+	}
+	.char-tok { display: inline-block; border-radius: 4px; padding: 0 1px; transition: background 0.15s; }
+	.char-mod { background: #fde68a; }
+	.char-ins { background: #bbf7d0; color: #166534; }
+	.char-del { background: #fecaca; color: #991b1b; text-decoration: line-through; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+<div class="max-w-5xl mx-auto px-4 py-8">
+	<header class="mb-8">
+		<h1 class="text-3xl font-bold text-slate-900">LLM Robustness to Typos & Noise</h1>
+		<p class="mt-2 text-slate-600">
+			Apply controlled character-level perturbations to a prompt, then inspect how the
+			noise affects what a model would receive. Use the checkboxes to pick which
+			transformations are active and the slider to control how much of the text is modified.
+		</p>
+	</header>
+	<!-- Controls -->
+	<section class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
+		<div class="flex flex-wrap items-center gap-6">
+			<div class="flex items-center gap-2">
+				<input type="checkbox" id="opt-swap" class="w-4 h-4 accent-indigo-600" checked />
+				<label for="opt-swap" class="text-sm font-medium">Swap adjacent letters</label>
+			</div>
+			<div class="flex items-center gap-2">
+				<input type="checkbox" id="opt-delete" class="w-4 h-4 accent-indigo-600" checked />
+				<label for="opt-delete" class="text-sm font-medium">Delete a letter</label>
+			</div>
+			<div class="flex items-center gap-2">
+				<input type="checkbox" id="opt-space" class="w-4 h-4 accent-indigo-600" checked />
+				<label for="opt-space" class="text-sm font-medium">Insert a space</label>
+			</div>
+			<div class="flex items-center gap-2">
+				<input type="checkbox" id="opt-stable" class="w-4 h-4 accent-emerald-600" />
+				<label for="opt-stable" class="text-sm font-medium">Smooth with stable random</label>
+			</div>
+		</div>
+		<div class="mt-5">
+			<div class="flex items-center justify-between mb-1">
+				<label for="pct" class="text-sm font-semibold text-slate-700">
+					Modification percentage (relative to character count)
+				</label>
+				<span id="pct-label" class="text-sm font-bold text-indigo-600">30%</span>
+			</div>
+			<input type="range" id="pct" min="0" max="100" value="30" class="w-full" />
+			<p class="text-xs text-slate-500 mt-1">
+				Of all editable characters, this fraction will be targeted by the selected
+				transformations (each target is perturbed by exactly one operation).
+			</p>
+		</div>
+		<div class="mt-4 flex items-center gap-3">
+			<button id="apply-btn"
+				class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition">
+				Apply Noise
+			</button>
+			<button id="copy-btn"
+				class="bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold px-4 py-2 rounded-lg transition">
+				Copy noisy output
+			</button>
+			<span id="status" class="text-xs text-slate-500"></span>
+		</div>
+	</section>
+	<!-- Main editor + output -->
+	<div class="grid md:grid-cols-2 gap-6">
+		<section class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+			<h2 class="text-lg font-semibold mb-3 text-slate-800">Input prompt</h2>
+			<textarea id="input" rows="12"
+				class="mono w-full text-sm border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-400 focus:outline-none resize-y"
+				placeholder="Type or load a test prompt below..."></textarea>
+			<div class="text-xs text-slate-500 mt-2">
+				Characters: <span id="char-count">0</span>
+			</div>
+		</section>
+		<section class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+			<h2 class="text-lg font-semibold mb-3 text-slate-800">Noisy output</h2>
+			<div id="output"
+				class="mono w-full text-sm border border-slate-300 rounded-lg p-3 min-h-[288px] whitespace-pre-wrap break-words bg-slate-50"></div>
+			<div class="text-xs text-slate-500 mt-2" id="mod-summary"></div>
+		</section>
+	</div>
+	<!-- Test prompts -->
+	<section class="mt-8">
+		<h2 class="text-xl font-bold text-slate-900 mb-1">Test prompts</h2>
+		<p class="text-sm text-slate-600 mb-4">
+			Four prompts: two short and two medium. Two instruct the model to
+			<span class="font-semibold">generate code</span> (visual verification), two require
+			<span class="font-semibold">direct answers</span>.
+		</p>
+		<div id="prompts" class="grid md:grid-cols-2 gap-4"></div>
+	</section>
+	<footer class="mt-10 text-xs text-slate-400 text-center">
+		Transformations use a fresh random seed each run unless "Smooth with stable random" is checked,
+		which seeds the noise so results are reproducible and the slider changes transition smoothly.
+	</footer>
+</div>
+<script>
+// ---------- Test prompt definitions ----------
+const TEST_PROMPTS = [
+	{
+		id: "p1",
+		title: "Short · Generate code",
+		kind: "code",
+		text: "Write a Python function that returns the longest word in a sentence."
+	},
+	{
+		id: "p2",
+		title: "Short · Direct answer",
+		kind: "answer",
+		text: "What is the time complexity of binary search?"
+	},
+	{
+		id: "p3",
+		title: "Medium · Generate code",
+		kind: "code",
+		text: "Write a JavaScript function debounce(fn, ms) that limits how often fn is called. It should return a new function which, when invoked repeatedly, only runs fn after ms milliseconds have passed without a new call, and always uses the most recent arguments."
+	},
+	{
+		id: "p4",
+		title: "Medium · Direct answer",
+		kind: "answer",
+		text: "Explain the difference between TCP and UDP in three sentences, focusing on reliability, ordering, and use cases such as video streaming versus file transfer."
+	}
+];
+// ---------- Rendering test prompts ----------
+const promptsEl = document.getElementById("prompts");
+TEST_PROMPTS.forEach(p => {
+	const badge = p.kind === "code"
+		? '<span class="text-[10px] uppercase tracking-wide font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">code</span>'
+		: '<span class="text-[10px] uppercase tracking-wide font-bold px-2 py-0.5 rounded bg-sky-100 text-sky-700">answer</span>';
+	const card = document.createElement("div");
+	card.className = "bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex flex-col";
+	card.innerHTML = `
+		<div class="flex items-center justify-between mb-2">
+			<span class="text-sm font-semibold text-slate-800">${p.title}</span>
+			${badge}
+		</div>
+		<p class="text-sm text-slate-600 flex-1 mono leading-relaxed">${escapeHtml(p.text)}</p>
+		<button data-load="${p.id}"
+			class="mt-3 self-start text-xs font-semibold text-indigo-600 hover:text-indigo-800 underline">
+			Load into input →
+		</button>
+	`;
+	promptsEl.appendChild(card);
+});
+document.addEventListener("click", (e) => {
+	const id = e.target.getAttribute("data-load");
+	if (id) {
+		const p = TEST_PROMPTS.find(x => x.id === id);
+		document.getElementById("input").value = p.text;
+		updateCharCount();
+		document.getElementById("output").textContent = "";
+		document.getElementById("mod-summary").textContent = "";
+		window.scrollTo({ top: 0, behavior: "smooth" });
+	}
+});
+// ---------- Helpers ----------
+function escapeHtml(s) {
+	return s.replace(/[&<>"']/g, c => ({
+		"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+	}[c]));
+}
+function updateCharCount() {
+	document.getElementById("char-count").textContent =
+		document.getElementById("input").value.length;
+}
+document.getElementById("input").addEventListener("input", updateCharCount);
+// ---------- The noise engine ----------
+// Applies selected transformations to a fraction (pct) of editable characters.
+// Each targeted character is perturbed by exactly one operation.
+function applyNoise(text, opts, pct) {
+	const chars = Array.from(text);
+	const n = chars.length;
+	if (n === 0) return { out: "", mods: [] };
+	// Candidate indices: letters or existing spaces (we skip newlines & punctuation-only spots
+	// only for swaps, but deletes/spaces can target any non-newline char).
+	const candidates = [];
+	for (let i = 0; i < n; i++) {
+		const c = chars[i];
+		if (c === "\n") continue;
+		candidates.push(i);
+	}
+	if (candidates.length === 0) return { out: text, mods: [] };
+	const targetCount = Math.round((pct / 100) * candidates.length);
+	// Build a list of available operations.
+	const ops = [];
+	if (opts.swap) ops.push("swap");
+	if (opts.delete) ops.push("delete");
+	if (opts.space) ops.push("space");
+	if (ops.length === 0) return { out: text, mods: [] };
+	// ---------- Seeded RNG (stable mode) ----------
+	// A tiny mulberry32 PRNG. When "stable" is on we seed it from a fixed value
+	// so the same input + options + percentage always produce the same noise.
+	// We also clamp the RNG to the pool's *stable* prefix so that raising the
+	// percentage extends the existing selection smoothly instead of reshuffling
+	// every index (which would make the slider jump around).
+	let rand;
+	if (opts.stable) {
+	const SEED = 0x9e3779b9;
+	let s = SEED >>> 0;
+	rand = () => {
+		s |= 0; s = (s + 0x6D2B79F5) | 0;
+		let t = Math.imul(s ^ (s >>> 15), 1 | s);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+	} else {
+	rand = Math.random;
+	}
+	// Shuffle candidates and pick the first targetCount.
+	const pool = candidates.slice();
+	for (let i = pool.length - 1; i > 0; i--) {
+	const j = Math.floor(rand() * (i + 1));
+	[pool[i], pool[j]] = [pool[j], pool[i]];
+	}
+	const targets = new Set(pool.slice(0, targetCount));
+	// We will produce a new string + a per-character annotation for highlighting.
+	// Annotation array aligns with the OUTPUT characters.
+	const outChars = [];
+	const ann = [];          // 'mod' | 'ins' | 'del' | null
+	const modsSummary = { swap: 0, delete: 0, space: 0 };
+	const usedTargets = new Set();
+	// Pre-assign operations to targets so swaps don't conflict with adjacent targets.
+	const targetArr = Array.from(targets).sort((a, b) => a - b);
+	const opFor = new Map();
+	targetArr.forEach(idx => {
+		let op = ops[Math.floor(rand() * ops.length)];
+		// If swap but next char is also a target or is newline, fall back to another op.
+		if (op === "swap") {
+			const next = idx + 1;
+			if (next >= n || chars[next] === "\n" || targets.has(next)) {
+				const alt = ops.filter(o => o !== "swap");
+					op = alt.length ? alt[Math.floor(rand() * alt.length)] : "swap";
+			}
+		}
+		opFor.set(idx, op);
+	});
+	for (let i = 0; i < n; i++) {
+		if (chars[i] === "\n") {
+			outChars.push("\n");
+			ann.push(null);
+			continue;
+		}
+		if (!targets.has(i)) {
+			outChars.push(chars[i]);
+			ann.push(null);
+			continue;
+		}
+		const op = opFor.get(i);
+		if (op === "swap") {
+			const j = i + 1;
+			outChars.push(chars[j]); ann.push("mod");
+			outChars.push(chars[i]); ann.push("mod");
+			usedTargets.add(i); usedTargets.add(j);
+			modsSummary.swap++;
+			i = j; // skip the swapped partner
+		} else if (op === "delete") {
+			// Delete this character: emit a struck-through token.
+			outChars.push(chars[i]); ann.push("del");
+			modsSummary.delete++;
+			usedTargets.add(i);
+		} else if (op === "space") {
+			// Insert a space before this character.
+			outChars.push(" "); ann.push("ins");
+			outChars.push(chars[i]); ann.push("mod");
+			modsSummary.space++;
+			usedTargets.add(i);
+		}
+	}
+	return { out: outChars.join(""), ann, mods: modsSummary };
+}
+// ---------- Apply handler ----------
+const outputEl = document.getElementById("output");
+const statusEl = document.getElementById("status");
+function renderOutput(result) {
+	outputEl.innerHTML = "";
+	const toks = Array.from(result.out);
+	toks.forEach((c, i) => {
+		const span = document.createElement("span");
+		span.className = "char-tok";
+		const a = result.ann[i];
+		if (a === "mod") span.classList.add("char-mod");
+		else if (a === "ins") span.classList.add("char-ins");
+		else if (a === "del") span.classList.add("char-del");
+		span.textContent = c;
+		outputEl.appendChild(span);
+	});
+	const m = result.mods;
+	document.getElementById("mod-summary").textContent =
+		`swaps: ${m.swap} · deletes: ${m.delete} · space-inserts: ${m.space}`;
+}
+function runApply() {
+	const text = document.getElementById("input").value;
+	const opts = {
+		swap: document.getElementById("opt-swap").checked,
+		delete: document.getElementById("opt-delete").checked,
+		space: document.getElementById("opt-space").checked,
+		stable: document.getElementById("opt-stable").checked
+	};
+	const pct = parseInt(document.getElementById("pct").value, 10);
+	if (!opts.swap && !opts.delete && !opts.space) {
+		statusEl.textContent = "Select at least one transformation.";
+		return;
+	}
+	const result = applyNoise(text, opts, pct);
+	renderOutput(result);
+	statusEl.textContent = "Done.";
+}
+document.getElementById("apply-btn").addEventListener("click", runApply);
+// ---------- Copy handler ----------
+document.getElementById("copy-btn").addEventListener("click", () => {
+	const text = outputEl.textContent;
+	if (!text) { statusEl.textContent = "Nothing to copy yet."; return; }
+	navigator.clipboard.writeText(text).then(() => {
+		statusEl.textContent = "Copied noisy output to clipboard.";
+	}).catch(() => {
+		statusEl.textContent = "Copy failed (clipboard blocked).";
+	});
+});
+// ---------- Slider label ----------
+const pctEl = document.getElementById("pct");
+const pctLabel = document.getElementById("pct-label");
+pctEl.addEventListener("input", () => {
+	pctLabel.textContent = pctEl.value + "%";
+	// Live-update the noisy output as the slider moves (only if there is input).
+	if (document.getElementById("input").value.length > 0) {
+		runApply();
+	}
+});
+// ---------- Init ----------
+document.getElementById("input").value = TEST_PROMPTS[0].text;
+updateCharCount();
+</script>
+</body>
+</html>
