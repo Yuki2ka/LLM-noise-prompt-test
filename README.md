@@ -2,6 +2,9 @@
 
 We are studying the robustness of LLMs to typos and noise.
 
+Proposed metrics + automatic benchmark design: see `BENCHMARK.md`
+(reference implementation of the metrics: `noisebench.py`, run with `--demo`).
+
 ## task:
 
 ### 1  
